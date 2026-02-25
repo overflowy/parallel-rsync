@@ -2,13 +2,16 @@
 
 Parallel rsync launcher with logging and per-host concurrency limits.
 
+```
 Usage:
-    python parallel_rsync.py -c config.yaml [--workers N] [--max-per-host M]
-                            [--log-file FILE] [--log-level LEVEL]
-                            [--timeout SECS] [--dry-run]
+    parallel_rsync.py -c config.yaml [--workers N] [--max-per-host M]
+                      [--log-file FILE] [--log-level LEVEL]
+                      [--timeout SECS] [--dry-run]
+```
 
 The YAML file should have the following structure:
 
+```yaml
 global_options:
   - "-avz"
   - "--delete"
@@ -24,8 +27,8 @@ groups:
     dest: "deploy@web01.example.com:/srv/www/logs/"
     options:
       - "--progress"
+```
 
-Global options are prepended to each group's options. Per-group options
-can override or extend the global ones.
+Global options are prepended to each group's options. Per-group options can override or extend the global ones.
 
-Requires: PyYAML (pip install pyyaml)
+Requires: PyYAML (pip install pyyaml).
