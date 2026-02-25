@@ -1,16 +1,27 @@
 # parallel-rsync
 
-Parallel rsync launcher with logging and per-host concurrency limits.
-
-<img width="2450" height="1142" alt="CleanShot 2026-02-25 at 18 57 37@2x" src="https://github.com/user-attachments/assets/042d47de-35fe-4bdd-8c4b-72f9b8859058" />
-
+Parallel rsync launcher with fancy progress bars.
 
 ## Usage
 
 ```
-parallel_rsync.py -c config.yaml [--workers N] [--max-per-host M]
-                  [--log-file FILE] [--log-level LEVEL]
-                  [--timeout SECS] [--dry-run]
+parallel_rsync.py [-h] -c CONFIG [--workers WORKERS] [--max-per-host MAX_PER_HOST] [--log-file LOG_FILE]
+                  [--log-level {DEBUG,INFO,WARNING,ERROR}] [--timeout TIMEOUT] [--dry-run] [--no-progress]
+
+Launch multiple rsync jobs in parallel with fancy progress bars.
+
+options:
+  -h, --help            show this help message and exit
+  -c, --config CONFIG   Path to the YAML configuration file.
+  --workers WORKERS     Maximum number of parallel rsync processes overall (default: 4).
+  --max-per-host MAX_PER_HOST
+                        Maximum concurrent rsync jobs per host (default: 2).
+  --log-file LOG_FILE   Optional file path for logging output. If omitted, no log file is written.
+  --log-level {DEBUG,INFO,WARNING,ERROR}
+                        Logging verbosity (default: INFO).
+  --timeout TIMEOUT     Timeout in seconds for each rsync process (default: no timeout).
+  --dry-run             Add '--dry-run' to every rsync command for testing.
+  --no-progress         Disable the fancy progress bars (plain log output only).
 ```
 
 The config file should have the following structure:
