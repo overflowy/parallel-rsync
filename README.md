@@ -2,6 +2,8 @@
 
 Parallel rsync launcher with fancy progress bars.
 
+https://github.com/user-attachments/assets/d321c061-2fbd-44c5-9316-d94f0bd6a380
+
 ## Usage
 
 ```
