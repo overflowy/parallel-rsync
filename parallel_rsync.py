@@ -144,8 +144,8 @@ def setup_logging(log_level: str, log_file: str | None = None) -> logging.Logger
 
 
 _STATUS = {
-    "waiting": "[dim]⏳ waiting[/dim]",
-    "running": "[bold cyan]⟳  syncing[/bold cyan]",
+    "waiting": "[dim]waiting[/dim]",
+    "running": "[bold cyan]syncing[/bold cyan]",
     "done": "[bold green]✔  done[/bold green]",
     "failed": "[bold red]✖  failed[/bold red]",
     "timeout": "[bold yellow]⏱  timeout[/bold yellow]",
