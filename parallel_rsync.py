@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import importlib
 import logging
 import shlex
 import subprocess
@@ -10,6 +11,15 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import yaml
+
+
+def get_rich_handler_class():
+    """Load rich's console log handler if installed."""
+    try:
+        rich_logging = importlib.import_module("rich.logging")
+    except ImportError:
+        return None
+    return getattr(rich_logging, "RichHandler", None)
 
 
 def load_config(path: Path) -> dict:
@@ -53,7 +63,9 @@ def build_rsync_cmd(group: dict, global_options: list[str] | None = None) -> lis
     dest = group.get("dest")
     group_options = group.get("options", [])
     if not src or not dest:
-        raise ValueError(f"Group '{group.get('name', '<unnamed>')}' missing src or dest.")
+        raise ValueError(
+            f"Group '{group.get('name', '<unnamed>')}' missing src or dest."
+        )
     # Ensure src ends with a slash for directory sync semantics
     if not src.endswith("/"):
         src = src + "/"
@@ -113,10 +125,17 @@ def setup_logging(log_file: str, log_level: str) -> logging.Logger:
     fh.setFormatter(formatter)
     logger.addHandler(fh)
 
-    # Console handler
-    ch = logging.StreamHandler(sys.stdout)
-    ch.setLevel(level)
-    ch.setFormatter(formatter)
+    rich_handler_class = get_rich_handler_class()
+
+    # Console handler (colorized when rich is installed)
+    if rich_handler_class is not None:
+        ch = rich_handler_class(show_path=False, markup=False)
+        ch.setLevel(level)
+        ch.setFormatter(logging.Formatter("%(message)s"))
+    else:
+        ch = logging.StreamHandler(sys.stdout)
+        ch.setLevel(level)
+        ch.setFormatter(formatter)
     logger.addHandler(ch)
 
     return logger
@@ -254,6 +273,8 @@ def main() -> None:
     # Logging setup
     # ------------------------------------------------------------------
     logger = setup_logging(args.log_file, args.log_level)
+    if get_rich_handler_class() is None:
+        logger.warning("rich is not installed; console logs will not be colorized")
     logger.info("=== Parallel rsync launcher started ===")
     logger.info(f"Config file: {args.config}")
     logger.info(f"Overall workers: {args.workers}")

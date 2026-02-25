@@ -31,4 +31,4 @@ groups:
 
 Global options are prepended to each group's options. Per-group options can override or extend the global ones.
 
-Requires: PyYAML (pip install pyyaml).
+Requires: PyYAML (`pip install pyyaml`). Optional for colorized console logs: Rich (`pip install rich`).
