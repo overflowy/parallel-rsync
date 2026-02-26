@@ -57,6 +57,10 @@ Global options are prepended to each group's options. Per-group options can over
 
 ```sh
 task build
+
+# or
+
+uvx cosmofy bundle
 ```
 
 This will create a `parallel-rsync` binary in the `dist` directory that can be used on any platform.
