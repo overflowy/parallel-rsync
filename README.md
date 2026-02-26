@@ -53,6 +53,14 @@ Global options are prepended to each group's options. Per-group options can over
 - PyYAML (`pip install pyyaml`)
 - Optional for colorized console logs: Rich (`pip install rich`)
 
+## Build (universal binary)
+
+```sh
+task build
+```
+
+This will create a `parallel-rsync` binary in the `dist` directory that can be used on any platform.
+
 ## License
 
 MIT

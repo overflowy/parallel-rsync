@@ -3,8 +3,14 @@ name = "parallel-rsync"
 version = "0.1.0"
 description = ""
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.12"
 dependencies = [
     "pyyaml>=6.0.3",
     "rich>=14.3.3",
 ]
+
+[project.scripts]
+parallel-rsync = "parallel_rsync:main"
+
+[tool.uv]
+package = true
