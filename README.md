@@ -10,7 +10,7 @@ https://github.com/user-attachments/assets/fd146967-0946-4ee1-92a0-9f49864c7fc8
 parallel_rsync.py [-h] -c CONFIG [--workers WORKERS] [--max-per-host MAX_PER_HOST] [--log-file LOG_FILE]
                   [--log-level {DEBUG,INFO,WARNING,ERROR}] [--timeout TIMEOUT] [--dry-run] [--no-progress]
 
-Launch multiple rsync jobs in parallel with fancy progress bars.
+Launch multiple rsync jobs in parallel.
 
 options:
   -h, --help            show this help message and exit

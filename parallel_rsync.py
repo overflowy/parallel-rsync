@@ -383,9 +383,7 @@ def _print_summary(results: list[dict]) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Launch multiple rsync jobs in parallel with fancy progress bars."
-    )
+    parser = argparse.ArgumentParser(description="Launch multiple rsync jobs in parallel.")
     parser.add_argument(
         "-c",
         "--config",
