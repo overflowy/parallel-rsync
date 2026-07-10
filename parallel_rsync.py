@@ -367,6 +367,74 @@ def run_rsync_live(
 # Summary table
 # ---------------------------------------------------------------------------
 
+_RSYNC_EXIT_CODES = {
+    0: "Success",
+    1: "Syntax or usage error",
+    2: "Protocol incompatibility",
+    3: "Errors selecting input/output files, dirs",
+    4: "Requested action not supported",
+    5: "Error starting client-server protocol",
+    6: "Daemon unable to append to log-file",
+    10: "Error in socket I/O",
+    11: "Error in file I/O",
+    12: "Error in rsync protocol data stream",
+    13: "Errors with program diagnostics",
+    14: "Error in IPC code",
+    20: "Received SIGUSR1 or SIGINT",
+    21: "Some error returned by waitpid()",
+    22: "Error allocating core memory buffers",
+    23: "Partial transfer due to error",
+    24: "Partial transfer due to vanished source files",
+    25: "The --max-delete limit stopped deletions",
+    30: "Timeout in data send/receive",
+    35: "Timeout waiting for daemon connection",
+}
+
+_STDERR_TAIL_LINES = 10
+
+
+def _describe_exit(rc: int) -> str:
+    """Human-readable label for a result's return code."""
+    if rc == -2:
+        return "timeout"
+    if rc == -1:
+        return "exception"
+    meaning = _RSYNC_EXIT_CODES.get(rc)
+    return f"exit {rc} ({meaning})" if meaning else f"exit {rc}"
+
+
+def _failure_detail(result: dict) -> tuple[str, list[str], int]:
+    """Return (header, stderr tail lines, omitted line count) for a failed result."""
+    header = f"{result['name']} — {_describe_exit(result['returncode'])}"
+    lines = [line for line in result["stderr"].splitlines() if line.strip()]
+    omitted = max(0, len(lines) - _STDERR_TAIL_LINES)
+    return header, lines[-_STDERR_TAIL_LINES:], omitted
+
+
+def _print_failure_details(failures: list[dict]) -> None:
+    """Print the command and stderr tail for each failed group."""
+    if _RICH_AVAILABLE:
+        console = Console()
+        for r in sorted(failures, key=lambda x: x["name"]):
+            header, tail, omitted = _failure_detail(r)
+            console.print(f"[bold red]✖ {header}[/bold red]")
+            console.print(f"  [dim]$ {r['cmd']}[/dim]")
+            if omitted:
+                console.print(f"  [dim]... ({omitted} earlier lines omitted, see --log-file)[/dim]")
+            for line in tail:
+                console.print(f"  {line}", markup=False, highlight=False)
+            console.print()
+    else:
+        for r in sorted(failures, key=lambda x: x["name"]):
+            header, tail, omitted = _failure_detail(r)
+            print(f"[FAIL] {header}")
+            print(f"  $ {r['cmd']}")
+            if omitted:
+                print(f"  ... ({omitted} earlier lines omitted, see --log-file)")
+            for line in tail:
+                print(f"  {line}")
+            print()
+
 
 def _print_summary(results: list[dict]) -> None:
     """Print a pretty summary table using rich (falls back to plain text)."""
@@ -422,6 +490,9 @@ def _print_summary(results: list[dict]) -> None:
             tag = "OK" if rc == 0 else "FAIL"
             print(f"  [{tag}] {r['name']} (host={r['host']}, exit={rc})")
         print()
+
+    if failures:
+        _print_failure_details(failures)
 
 
 # ---------------------------------------------------------------------------
