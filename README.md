@@ -17,9 +17,11 @@ options:
   -c, --config CONFIG   Path to the YAML configuration file. If omitted, falls back to
                         $XDG_CONFIG_HOME/parallel-rsync/config.yml (then config.yaml), with
                         $XDG_CONFIG_HOME defaulting to ~/.config.
-  --workers WORKERS     Maximum number of parallel rsync processes overall (default: 4).
+  --workers WORKERS     Maximum number of parallel rsync processes overall. Overrides the
+                        'workers' config key (default: 4).
   --max-per-host MAX_PER_HOST
-                        Maximum concurrent rsync jobs per host (default: 2).
+                        Maximum concurrent rsync jobs per host. Overrides the 'max_per_host'
+                        config key (default: 2).
   --log-file LOG_FILE   Optional file path for logging output. If omitted, no log file is written.
   --log-level {DEBUG,INFO,WARNING,ERROR}
                         Logging verbosity (default: INFO).
@@ -31,9 +33,13 @@ options:
 The config file should have the following structure:
 
 ```yaml
+workers: 8        # optional, overridden by --workers (default: 4)
+max_per_host: 4   # optional, overridden by --max-per-host (default: 2)
+
 global_options:
   - "-avz"
   - "--delete"
+  - "--rsync-path=sudo rsync"
 
 groups:
   - name: "web-assets"
@@ -44,11 +50,15 @@ groups:
   - name: "web-logs"
     src: "/var/log/nginx/"
     dest: "deploy@web01.example.com:/srv/www/logs/"
+    exclude_options:
+      - "--rsync-path"
     options:
       - "--progress"
 ```
 
 Global options are prepended to each group's options. Per-group options can override or extend the global ones.
+
+A group can drop specific global options with `exclude_options`: an entry matches a global option either exactly or by its name before the `=` (so `--rsync-path` drops `--rsync-path=sudo rsync`). Exclusions only apply to global options, never to the group's own `options`.
 
 ## Requirements
 

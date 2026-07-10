@@ -95,6 +95,16 @@ def load_config(path: Path) -> dict:
         raise ValueError("'groups' must be a list of group definitions.")
     if "global_options" in cfg and not isinstance(cfg["global_options"], list):
         raise ValueError("'global_options' must be a list of rsync option strings.")
+    for key in ("workers", "max_per_host"):
+        if key in cfg and (not isinstance(cfg[key], int) or cfg[key] < 1):
+            raise ValueError(f"'{key}' must be a positive integer.")
+    for group in cfg["groups"]:
+        excludes = group.get("exclude_options")
+        if excludes is not None and (
+            not isinstance(excludes, list) or not all(isinstance(e, str) for e in excludes)
+        ):
+            name = group.get("name", "<unnamed>")
+            raise ValueError(f"Group '{name}': 'exclude_options' must be a list of strings.")
     return cfg
 
 
@@ -109,17 +119,27 @@ def ensure_dest_dir(dest: str, logger: logging.Logger, name: str) -> None:
         dest_path.mkdir(parents=True, exist_ok=True)
 
 
+def _option_excluded(option: str, excludes: list[str]) -> bool:
+    """Return True if *option* matches an exclusion entry.
+
+    An entry matches on the exact string or on the option name before '='
+    (so "--rsync-path" excludes "--rsync-path=sudo rsync").
+    """
+    return any(option == e or option.startswith(e + "=") for e in excludes)
+
+
 def build_rsync_cmd(group: dict, global_options: list[str] | None = None) -> list[str]:
     """Construct the rsync command list for a given group."""
     src = group.get("src")
     dest = group.get("dest")
     group_options = group.get("options", [])
+    excludes = group.get("exclude_options", [])
     if not src or not dest:
         raise ValueError(f"Group '{group.get('name', '<unnamed>')}' missing src or dest.")
     if not src.endswith("/"):
         src = src + "/"
-    merged_options = list(global_options or []) + list(group_options)
-    cmd = ["rsync"] + merged_options + [src, dest]
+    kept_globals = [o for o in (global_options or []) if not _option_excluded(o, excludes)]
+    cmd = ["rsync"] + kept_globals + list(group_options) + [src, dest]
     return cmd
 
 
@@ -420,14 +440,20 @@ def main() -> None:
     parser.add_argument(
         "--workers",
         type=int,
-        default=4,
-        help="Maximum number of parallel rsync processes overall (default: 4).",
+        default=None,
+        help=(
+            "Maximum number of parallel rsync processes overall. "
+            "Overrides the 'workers' config key (default: 4)."
+        ),
     )
     parser.add_argument(
         "--max-per-host",
         type=int,
-        default=2,
-        help="Maximum concurrent rsync jobs per host (default: 2).",
+        default=None,
+        help=(
+            "Maximum concurrent rsync jobs per host. "
+            "Overrides the 'max_per_host' config key (default: 2)."
+        ),
     )
     parser.add_argument(
         "--log-file",
@@ -470,20 +496,25 @@ def main() -> None:
         logger.error(str(exc))
         sys.exit(1)
 
-    logger.info("=== Parallel rsync started ===")
-    logger.info(f"Config file: {config_path}")
-    logger.info(f"Overall workers: {args.workers}")
-    logger.info(f"Per-host concurrency limit: {args.max_per_host}")
-    logger.info(f"Timeout: {args.timeout or 'none'}")
-    logger.info(f"Dry-run mode: {'ON' if args.dry_run else 'OFF'}")
-
-    # ------------------------------------------------------------------
     try:
         cfg = load_config(config_path)
     except Exception as exc:
         print(f"Error: failed to load config: {exc}", file=sys.stderr)
         logger.error(f"Failed to load config: {exc}")
         sys.exit(1)
+
+    # CLI flag > config key > built-in default
+    workers = args.workers if args.workers is not None else cfg.get("workers", 4)
+    max_per_host = (
+        args.max_per_host if args.max_per_host is not None else cfg.get("max_per_host", 2)
+    )
+
+    logger.info("=== Parallel rsync started ===")
+    logger.info(f"Config file: {config_path}")
+    logger.info(f"Overall workers: {workers}")
+    logger.info(f"Per-host concurrency limit: {max_per_host}")
+    logger.info(f"Timeout: {args.timeout or 'none'}")
+    logger.info(f"Dry-run mode: {'ON' if args.dry_run else 'OFF'}")
 
     groups = cfg["groups"]
     global_options: list[str] = cfg.get("global_options", [])
@@ -515,7 +546,7 @@ def main() -> None:
         return host
 
     hosts = {_effective_host(g) for g in groups}
-    host_semaphores = {host: threading.Semaphore(args.max_per_host) for host in hosts}
+    host_semaphores = {host: threading.Semaphore(max_per_host) for host in hosts}
     logger.info(f"Detected hosts: {', '.join(sorted(hosts))}")
 
     # ------------------------------------------------------------------
@@ -568,7 +599,7 @@ def main() -> None:
     if use_progress:
         assert progress is not None
         with progress:
-            with ThreadPoolExecutor(max_workers=args.workers) as executor:
+            with ThreadPoolExecutor(max_workers=workers) as executor:
                 future_to_name = {
                     executor.submit(_run, g): g.get("name", "unnamed") for g in groups
                 }
@@ -576,7 +607,7 @@ def main() -> None:
                     results.append(future.result())
     else:
         # Fallback: no progress bars
-        with ThreadPoolExecutor(max_workers=args.workers) as executor:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
             future_to_name = {executor.submit(_run, g): g.get("name", "unnamed") for g in groups}
             for future in as_completed(future_to_name):
                 result = future.result()
