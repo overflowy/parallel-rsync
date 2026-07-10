@@ -7,14 +7,16 @@ https://github.com/user-attachments/assets/fd146967-0946-4ee1-92a0-9f49864c7fc8
 ## Usage
 
 ```
-parallel_rsync.py [-h] -c CONFIG [--workers WORKERS] [--max-per-host MAX_PER_HOST] [--log-file LOG_FILE]
+parallel_rsync.py [-h] [-c CONFIG] [--workers WORKERS] [--max-per-host MAX_PER_HOST] [--log-file LOG_FILE]
                   [--log-level {DEBUG,INFO,WARNING,ERROR}] [--timeout TIMEOUT] [--dry-run] [--no-progress]
 
 Launch multiple rsync jobs in parallel.
 
 options:
   -h, --help            show this help message and exit
-  -c, --config CONFIG   Path to the YAML configuration file.
+  -c, --config CONFIG   Path to the YAML configuration file. If omitted, falls back to
+                        $XDG_CONFIG_HOME/parallel-rsync/config.yml (then config.yaml), with
+                        $XDG_CONFIG_HOME defaulting to ~/.config.
   --workers WORKERS     Maximum number of parallel rsync processes overall (default: 4).
   --max-per-host MAX_PER_HOST
                         Maximum concurrent rsync jobs per host (default: 2).

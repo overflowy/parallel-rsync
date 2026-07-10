@@ -2,6 +2,7 @@
 
 import argparse
 import logging
+import os
 import re
 import shlex
 import subprocess
@@ -58,6 +59,27 @@ def _parse_progress_line(line: str) -> dict | None:
         "remaining": int(m.group("remaining")) if m.group("remaining") else 0,
         "total": int(m.group("total")) if m.group("total") else 0,
     }
+
+
+def default_config_candidates() -> list[Path]:
+    """Return the XDG fallback config paths, in search order."""
+    xdg_config_home = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    config_dir = Path(xdg_config_home) / "parallel-rsync"
+    return [config_dir / "config.yml", config_dir / "config.yaml"]
+
+
+def resolve_config_path(explicit: Path | None) -> Path:
+    """Resolve the config file path, falling back to the XDG location."""
+    if explicit is not None:
+        return explicit
+    candidates = default_config_candidates()
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    checked = ", ".join(str(c) for c in candidates)
+    raise FileNotFoundError(
+        f"No config file found. Pass -c/--config or create one of: {checked}"
+    )
 
 
 def load_config(path: Path) -> dict:
@@ -388,8 +410,12 @@ def main() -> None:
         "-c",
         "--config",
         type=Path,
-        required=True,
-        help="Path to the YAML configuration file.",
+        default=None,
+        help=(
+            "Path to the YAML configuration file. If omitted, falls back to "
+            "$XDG_CONFIG_HOME/parallel-rsync/config.yml (then config.yaml), "
+            "with $XDG_CONFIG_HOME defaulting to ~/.config."
+        ),
     )
     parser.add_argument(
         "--workers",
@@ -436,8 +462,16 @@ def main() -> None:
 
     # ------------------------------------------------------------------
     logger = setup_logging(args.log_level, args.log_file)
+
+    try:
+        config_path = resolve_config_path(args.config)
+    except FileNotFoundError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        logger.error(str(exc))
+        sys.exit(1)
+
     logger.info("=== Parallel rsync started ===")
-    logger.info(f"Config file: {args.config}")
+    logger.info(f"Config file: {config_path}")
     logger.info(f"Overall workers: {args.workers}")
     logger.info(f"Per-host concurrency limit: {args.max_per_host}")
     logger.info(f"Timeout: {args.timeout or 'none'}")
@@ -445,8 +479,9 @@ def main() -> None:
 
     # ------------------------------------------------------------------
     try:
-        cfg = load_config(args.config)
+        cfg = load_config(config_path)
     except Exception as exc:
+        print(f"Error: failed to load config: {exc}", file=sys.stderr)
         logger.error(f"Failed to load config: {exc}")
         sys.exit(1)
 
