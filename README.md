@@ -55,6 +55,24 @@ Global options are prepended to each group's options. Per-group options can over
 - PyYAML (`pip install pyyaml`)
 - Optional for colorized console logs: Rich (`pip install rich`)
 
+## Install
+
+```sh
+task install
+
+# or
+
+uv tool install .
+```
+
+This installs a `parallel-rsync` executable on your PATH. Uninstall with `task uninstall`.
+
+Alternatively, run it without installing:
+
+```sh
+uvx --from . parallel-rsync
+```
+
 ## Build (universal binary)
 
 ```sh

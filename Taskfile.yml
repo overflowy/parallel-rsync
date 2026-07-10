@@ -11,3 +11,13 @@ tasks:
     desc: Build the binary
     cmds:
       - uvx cosmofy bundle
+
+  install:
+    desc: Install globally with uv
+    cmds:
+      - uv tool install .
+
+  uninstall:
+    desc: Uninstall the global install
+    cmds:
+      - uv tool uninstall parallel-rsync
