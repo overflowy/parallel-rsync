@@ -68,6 +68,14 @@ def default_config_candidates() -> list[Path]:
     return [config_dir / "config.yml", config_dir / "config.yaml"]
 
 
+def resolve_setting(cli_value: int | None, cfg: dict, key: str, default: int) -> int:
+    """Resolve a positive-integer setting: CLI flag > config key > default."""
+    value = cli_value if cli_value is not None else cfg.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f"'{key}' must be a positive integer (got {value!r}).")
+    return value
+
+
 def resolve_config_path(explicit: Path | None) -> Path:
     """Resolve the config file path, falling back to the XDG location."""
     if explicit is not None:
@@ -95,9 +103,6 @@ def load_config(path: Path) -> dict:
         raise ValueError("'groups' must be a list of group definitions.")
     if "global_options" in cfg and not isinstance(cfg["global_options"], list):
         raise ValueError("'global_options' must be a list of rsync option strings.")
-    for key in ("workers", "max_per_host"):
-        if key in cfg and (not isinstance(cfg[key], int) or cfg[key] < 1):
-            raise ValueError(f"'{key}' must be a positive integer.")
     for group in cfg["groups"]:
         excludes = group.get("exclude_options")
         if excludes is not None and (
@@ -132,8 +137,8 @@ def build_rsync_cmd(group: dict, global_options: list[str] | None = None) -> lis
     """Construct the rsync command list for a given group."""
     src = group.get("src")
     dest = group.get("dest")
-    group_options = group.get("options", [])
-    excludes = group.get("exclude_options", [])
+    group_options = group.get("options") or []
+    excludes = group.get("exclude_options") or []
     if not src or not dest:
         raise ValueError(f"Group '{group.get('name', '<unnamed>')}' missing src or dest.")
     if not src.endswith("/"):
@@ -499,15 +504,17 @@ def main() -> None:
     try:
         cfg = load_config(config_path)
     except Exception as exc:
-        print(f"Error: failed to load config: {exc}", file=sys.stderr)
-        logger.error(f"Failed to load config: {exc}")
+        print(f"Error: failed to load config {config_path}: {exc}", file=sys.stderr)
+        logger.error(f"Failed to load config {config_path}: {exc}")
         sys.exit(1)
 
-    # CLI flag > config key > built-in default
-    workers = args.workers if args.workers is not None else cfg.get("workers", 4)
-    max_per_host = (
-        args.max_per_host if args.max_per_host is not None else cfg.get("max_per_host", 2)
-    )
+    try:
+        workers = resolve_setting(args.workers, cfg, "workers", 4)
+        max_per_host = resolve_setting(args.max_per_host, cfg, "max_per_host", 2)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        logger.error(str(exc))
+        sys.exit(1)
 
     logger.info("=== Parallel rsync started ===")
     logger.info(f"Config file: {config_path}")

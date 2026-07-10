@@ -60,6 +60,8 @@ Global options are prepended to each group's options. Per-group options can over
 
 A group can drop specific global options with `exclude_options`: an entry matches a global option either exactly or by its name before the `=` (so `--rsync-path` drops `--rsync-path=sudo rsync`). Exclusions only apply to global options, never to the group's own `options`.
 
+Note: exclusion matches single list entries only. Write global options that take a value in `--opt=value` form — if the value is a separate list entry (`["--rsync-path", "sudo rsync"]`), excluding `--rsync-path` would leave the orphaned value behind, which rsync would treat as an extra source path.
+
 ## Requirements
 
 - PyYAML (`pip install pyyaml`)
