@@ -8,7 +8,9 @@ import shlex
 import subprocess
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import yaml
@@ -501,6 +503,8 @@ def _print_summary(results: list[dict]) -> None:
 
 
 def main() -> None:
+    started_at = datetime.now()
+    t0 = time.monotonic()
     parser = argparse.ArgumentParser(description="Launch multiple rsync jobs in parallel.")
     parser.add_argument(
         "-c",
@@ -698,6 +702,14 @@ def main() -> None:
                     logger.info(f"[{name}] rsync completed successfully")
 
     _print_summary(results)
+
+    duration = timedelta(seconds=round(time.monotonic() - t0))
+    footer = f"Run started {started_at:%Y-%m-%d %H:%M:%S}, took {duration}"
+    if _RICH_AVAILABLE:
+        Console().print(f"[dim]{footer}[/dim]")
+    else:
+        print(footer)
+    logger.info(footer)
 
     failures = [r for r in results if r["returncode"] != 0]
     logger.info(
