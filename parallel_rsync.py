@@ -34,6 +34,18 @@ try:
 except ImportError:
     pass
 
+if _RICH_AVAILABLE:
+
+    class _StatusIconColumn(SpinnerColumn):
+        """One shared icon cell: a spinner while the job runs, the status
+        icon (set via the task's 'icon' field) once it settles."""
+
+        def render(self, task):
+            icon = task.fields.get("icon")
+            if icon is not None:
+                return Text.from_markup(icon)
+            return self.spinner.render(task.get_time())
+
 
 _PROGRESS_RE = re.compile(
     r"^\s*"
@@ -42,7 +54,7 @@ _PROGRESS_RE = re.compile(
     r"(?P<speed>\S+/s)\s+"  # transfer speed
     r"(?P<eta>\S+)"  # ETA
     r"(?:\s+\(xfr#(?P<xfr>\d+)"  # files transferred
-    r",\s*(?:to-chk|ir-chk)="
+    r",\s*(?P<chk>to-chk|ir-chk)="  # ir-chk: file scan still running
     r"(?P<remaining>\d+)/(?P<total>\d+)\))?"  # remaining/total files
 )
 
@@ -58,6 +70,7 @@ def _parse_progress_line(line: str) -> dict | None:
         "speed": m.group("speed"),
         "eta": m.group("eta"),
         "xfr": int(m.group("xfr")) if m.group("xfr") else 0,
+        "chk": m.group("chk"),
         "remaining": int(m.group("remaining")) if m.group("remaining") else 0,
         "total": int(m.group("total")) if m.group("total") else 0,
     }
@@ -249,13 +262,22 @@ def setup_logging(log_level: str, log_file: str | None = None) -> logging.Logger
     return logger
 
 
+# (icon, label) per status. Icon None means "job is active, show the spinner";
+# the icon and label render in separate columns so everything aligns.
 _STATUS = {
-    "waiting": "[dim]waiting[/dim]",
-    "running": "[bold cyan]syncing[/bold cyan]",
-    "done": "[bold green]✔  done[/bold green]",
-    "failed": "[bold red]✖  failed[/bold red]",
-    "timeout": "[bold yellow]⏱  timeout[/bold yellow]",
+    "waiting": ("[dim]·[/dim]", "[dim]waiting[/dim]"),
+    "checking": (None, "[bold blue]checking[/bold blue]"),
+    "running": (None, "[bold cyan]syncing[/bold cyan]"),
+    "done": ("[bold green]✔[/bold green]", "[bold green]done[/bold green]"),
+    "failed": ("[bold red]✖[/bold red]", "[bold red]failed[/bold red]"),
+    "timeout": ("[bold yellow]⏱[/bold yellow]", "[bold yellow]timeout[/bold yellow]"),
 }
+
+
+def _status_fields(key: str) -> dict:
+    """Task-field updates (icon + label) for a status change."""
+    icon, label = _STATUS[key]
+    return {"icon": icon, "status": label}
 
 
 def _inject_progress2(cmd: list[str]) -> list[str]:
@@ -292,7 +314,7 @@ def run_rsync_live(
 
     # -- waiting --
     if progress and task_id is not None:
-        progress.update(task_id, description=f"{_STATUS['waiting']}  [bold]{name}[/bold]")
+        progress.update(task_id, **_status_fields("waiting"))
 
     _log(f"[{name}] Waiting for slot on host '{host}'")
 
@@ -306,12 +328,9 @@ def run_rsync_live(
             cmd = _inject_progress2(cmd)
             cmd_str = shlex.join(cmd)
 
-            # -- running --
+            # -- running: rsync starts by scanning the file list --
             if progress and task_id is not None:
-                progress.update(
-                    task_id,
-                    description=f"{_STATUS['running']}  [bold]{name}[/bold]",
-                )
+                progress.update(task_id, **_status_fields("checking"))
 
             _log(f"[{name}] Starting rsync on host '{host}': {cmd_str}")
 
@@ -326,6 +345,8 @@ def run_rsync_live(
             stderr_lines: list[str] = []
 
             # Read stdout in a thread so we can enforce timeout
+            phase = {"current": "checking"}
+
             def _read_stdout():
                 assert proc.stdout is not None
                 for raw_line in proc.stdout:
@@ -333,12 +354,18 @@ def run_rsync_live(
                     stdout_lines.append(line)
                     parsed = _parse_progress_line(line)
                     if parsed and progress and task_id is not None:
-                        progress.update(
-                            task_id,
-                            completed=parsed["pct"],
-                            speed=parsed["speed"],
-                            eta=parsed["eta"],
-                        )
+                        updates = {
+                            "completed": parsed["pct"],
+                            "speed": parsed["speed"],
+                            "eta": parsed["eta"],
+                        }
+                        # ir-chk means the file scan is still running; to-chk
+                        # means it finished and this is a real transfer phase.
+                        new_phase = {"ir-chk": "checking", "to-chk": "running"}.get(parsed["chk"])
+                        if new_phase and new_phase != phase["current"]:
+                            phase["current"] = new_phase
+                            updates.update(_status_fields(new_phase))
+                        progress.update(task_id, **updates)
 
             def _read_stderr():
                 assert proc.stderr is not None
@@ -359,10 +386,7 @@ def run_rsync_live(
                 t_err.join(timeout=2)
                 _log(f"[{name}] rsync timed out after {timeout}s on host '{host}'", "error")
                 if progress and task_id is not None:
-                    progress.update(
-                        task_id,
-                        description=f"{_STATUS['timeout']}  [bold]{name}[/bold]",
-                    )
+                    progress.update(task_id, eta="--:--", **_status_fields("timeout"))
                 return {
                     "name": name,
                     "host": host,
@@ -388,15 +412,10 @@ def run_rsync_live(
             if progress and task_id is not None:
                 if rc == 0:
                     progress.update(
-                        task_id,
-                        completed=100,
-                        description=f"{_STATUS['done']}  [bold]{name}[/bold]",
+                        task_id, completed=100, eta="--:--", **_status_fields("done")
                     )
                 else:
-                    progress.update(
-                        task_id,
-                        description=f"{_STATUS['failed']}  [bold]{name}[/bold]",
-                    )
+                    progress.update(task_id, eta="--:--", **_status_fields("failed"))
 
             return {
                 "name": name,
@@ -411,10 +430,7 @@ def run_rsync_live(
         except Exception as e:
             _log(f"[{name}] Exception while running rsync: {e}", "error")
             if progress and task_id is not None:
-                progress.update(
-                    task_id,
-                    description=f"{_STATUS['failed']}  [bold]{name}[/bold]",
-                )
+                progress.update(task_id, eta="--:--", **_status_fields("failed"))
             return {
                 "name": name,
                 "host": host,
@@ -722,9 +738,10 @@ def main() -> None:
 
     if use_progress:
         progress = Progress(
-            SpinnerColumn("dots"),
-            TextColumn("{task.description}", markup=True),
-            BarColumn(bar_width=30, complete_style="green", finished_style="bright_green"),
+            _StatusIconColumn("dots"),
+            TextColumn("{task.fields[status]}", markup=True),
+            TextColumn("[bold]{task.fields[name]}[/bold]", markup=True),
+            BarColumn(bar_width=20, complete_style="green", finished_style="bright_green"),
             TaskProgressColumn(),
             TextColumn("•", style="dim"),
             TextColumn("[cyan]{task.fields[speed]}[/cyan]", markup=True),
@@ -739,11 +756,13 @@ def main() -> None:
         for g in groups:
             gname = g.get("name", "unnamed")
             tid = progress.add_task(
-                description=f"{_STATUS['waiting']}  [bold]{gname}[/bold]",
+                description="",
                 total=100,
                 completed=0,
+                name=gname,
                 speed="--",
                 eta="--:--",
+                **_status_fields("waiting"),
             )
             task_ids[gname] = tid
 
