@@ -126,6 +126,63 @@ def ensure_dest_dir(dest: str, logger: logging.Logger, name: str) -> None:
         dest_path.mkdir(parents=True, exist_ok=True)
 
 
+def _rsync_path_is_remote(path: str) -> bool:
+    """True if rsync would treat *path* as remote.
+
+    Rsync's rule: a path is remote if a colon appears before the first slash
+    (host:path or host::module), or if it is an rsync:// URL. A colon after a
+    slash is an ordinary character in a local path.
+    """
+    if path.startswith("rsync://"):
+        return True
+    return ":" in path.split("/", 1)[0]
+
+
+# Removable-media conventions: path prefix -> number of components (including
+# the root) that make up the mount point. /media and /run/media nest the mount
+# point one level deeper (/media/<user>/<label>).
+_MOUNT_CONVENTIONS: list[tuple[tuple[str, ...], int]] = [
+    (("/", "run", "media"), 5),  # Linux udisks2: /run/media/<user>/<label>
+    (("/", "Volumes"), 3),  # macOS: /Volumes/<name>
+    (("/", "media"), 4),  # Linux udisks2 (older): /media/<user>/<label>
+    (("/", "mnt"), 3),  # Linux manual: /mnt/<name>
+]
+
+
+def _conventional_mount_point(parts: tuple[str, ...]) -> str | None:
+    """Return the mount point a path implies under known removable-media trees."""
+    for prefix, depth in _MOUNT_CONVENTIONS:
+        if len(parts) >= depth and parts[: len(prefix)] == prefix:
+            return str(Path(*parts[:depth]))
+    return None
+
+
+def unmounted_volume_paths(groups: list[dict]) -> dict[str, list[str]]:
+    """Map unmounted removable-media mount points to the groups that need them.
+
+    A stale directory left at a mount point is indistinguishable from the real
+    volume to rsync: with --mkpath it would back up onto the boot drive, and a
+    stale *source* combined with --delete would wipe the destination. Requiring
+    an actual mount point catches both before any job starts.
+    """
+    problems: dict[str, list[str]] = {}
+    for group in groups:
+        name = group.get("name", "<unnamed>")
+        for path in (group.get("src") or "", group.get("dest") or ""):
+            if not path or _rsync_path_is_remote(path):
+                continue
+            # realpath so spellings like //Volumes/X, /Volumes/Y/../X, and
+            # symlinks into a volume all resolve to the mount point they hit.
+            parts = Path(os.path.realpath(path)).parts
+            mount_point = _conventional_mount_point(parts)
+            if mount_point is None or os.path.ismount(mount_point):
+                continue
+            names = problems.setdefault(mount_point, [])
+            if name not in names:
+                names.append(name)
+    return problems
+
+
 def _option_excluded(option: str, excludes: list[str]) -> bool:
     """Return True if *option* matches an exclusion entry.
 
@@ -617,6 +674,17 @@ def main() -> None:
             g["options"] = opts
             patched.append(g)
         groups = patched
+
+    # ------------------------------------------------------------------
+    # Refuse to run against unmounted volumes
+    # ------------------------------------------------------------------
+    unmounted = unmounted_volume_paths(groups)
+    if unmounted:
+        for mount_point, names in sorted(unmounted.items()):
+            msg = f"{mount_point} is not mounted (needed by: {', '.join(names)})."
+            print(f"Error: {msg}", file=sys.stderr)
+            logger.error(msg)
+        sys.exit(1)
 
     # ------------------------------------------------------------------
     # Per-host semaphores
