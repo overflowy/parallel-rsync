@@ -297,6 +297,7 @@ def run_rsync_live(
     _log(f"[{name}] Waiting for slot on host '{host}'")
 
     with semaphore:
+        job_t0 = time.monotonic()
         try:
             if group.get("mkdir_dest", False):
                 ensure_dest_dir(dest, logger, name)
@@ -367,6 +368,7 @@ def run_rsync_live(
                     "host": host,
                     "cmd": cmd_str,
                     "returncode": -2,
+                    "duration": time.monotonic() - job_t0,
                     "stdout": "\n".join(stdout_lines),
                     "stderr": f"Timed out after {timeout}s",
                 }
@@ -401,6 +403,7 @@ def run_rsync_live(
                 "host": host,
                 "cmd": cmd_str,
                 "returncode": rc,
+                "duration": time.monotonic() - job_t0,
                 "stdout": stdout_text,
                 "stderr": stderr_text,
             }
@@ -417,6 +420,7 @@ def run_rsync_live(
                 "host": host,
                 "cmd": shlex.join(build_rsync_cmd(group, global_options)),
                 "returncode": -1,
+                "duration": time.monotonic() - job_t0,
                 "stdout": "",
                 "stderr": str(e),
             }
@@ -450,6 +454,11 @@ _RSYNC_EXIT_CODES = {
 }
 
 _STDERR_TAIL_LINES = 10
+
+
+def _format_duration(seconds: float) -> str:
+    """Render a duration in seconds as H:MM:SS."""
+    return str(timedelta(seconds=round(seconds)))
 
 
 def _describe_exit(rc: int) -> str:
@@ -512,6 +521,7 @@ def _print_summary(results: list[dict]) -> None:
         )
         table.add_column("Group", style="bold")
         table.add_column("Host", style="dim")
+        table.add_column("Duration", justify="right")
         table.add_column("Exit Code", justify="center")
         table.add_column("Status", justify="center")
 
@@ -526,7 +536,7 @@ def _print_summary(results: list[dict]) -> None:
             else:
                 status = Text("✖ Failed", style="bold red")
                 rc_text = Text(str(rc), style="red")
-            table.add_row(r["name"], r["host"], rc_text, status)
+            table.add_row(r["name"], r["host"], _format_duration(r["duration"]), rc_text, status)
 
         console.print(table)
 
@@ -547,7 +557,10 @@ def _print_summary(results: list[dict]) -> None:
         for r in sorted(results, key=lambda x: x["name"]):
             rc = r["returncode"]
             tag = "OK" if rc == 0 else "FAIL"
-            print(f"  [{tag}] {r['name']} (host={r['host']}, exit={rc})")
+            print(
+                f"  [{tag}] {r['name']} (host={r['host']}, exit={rc}, "
+                f"took={_format_duration(r['duration'])})"
+            )
         print()
 
     if failures:
