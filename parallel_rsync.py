@@ -10,7 +10,7 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import yaml
@@ -100,9 +100,7 @@ def resolve_config_path(explicit: Path | None) -> Path:
         if candidate.is_file():
             return candidate
     checked = ", ".join(str(c) for c in candidates)
-    raise FileNotFoundError(
-        f"No config file found. Pass -c/--config or create one of: {checked}"
-    )
+    raise FileNotFoundError(f"No config file found. Pass -c/--config or create one of: {checked}")
 
 
 def load_config(path: Path) -> dict:
@@ -115,7 +113,7 @@ def load_config(path: Path) -> dict:
     if not isinstance(cfg, dict) or "groups" not in cfg:
         raise ValueError("YAML must contain a top‑level 'groups' key.")
     if not isinstance(cfg["groups"], list):
-        raise ValueError("'groups' must be a list of group definitions.")
+        raise TypeError("'groups' must be a list of group definitions.")
     if "global_options" in cfg and not isinstance(cfg["global_options"], list):
         raise ValueError("'global_options' must be a list of rsync option strings.")
     for group in cfg["groups"]:
@@ -411,9 +409,7 @@ def run_rsync_live(
             # -- done / failed --
             if progress and task_id is not None:
                 if rc == 0:
-                    progress.update(
-                        task_id, completed=100, eta="--:--", **_status_fields("done")
-                    )
+                    progress.update(task_id, completed=100, eta="--:--", **_status_fields("done"))
                 else:
                     progress.update(task_id, eta="--:--", **_status_fields("failed"))
 
@@ -427,7 +423,7 @@ def run_rsync_live(
                 "stderr": stderr_text,
             }
 
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             _log(f"[{name}] Exception while running rsync: {e}", "error")
             if progress and task_id is not None:
                 progress.update(task_id, eta="--:--", **_status_fields("failed"))
@@ -589,7 +585,7 @@ def _print_summary(results: list[dict]) -> None:
 
 
 def main() -> None:
-    started_at = datetime.now()
+    started_at = datetime.now(UTC).astimezone()
     t0 = time.monotonic()
     parser = argparse.ArgumentParser(description="Launch multiple rsync jobs in parallel.")
     parser.add_argument(
@@ -664,7 +660,7 @@ def main() -> None:
 
     try:
         cfg = load_config(config_path)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         print(f"Error: failed to load config {config_path}: {exc}", file=sys.stderr)
         logger.error(f"Failed to load config {config_path}: {exc}")
         sys.exit(1)
@@ -734,7 +730,7 @@ def main() -> None:
     use_progress = _RICH_AVAILABLE and not args.no_progress
 
     progress = None
-    task_ids: dict[str, "TaskID"] = {}
+    task_ids: dict[str, TaskID] = {}
 
     if use_progress:
         progress = Progress(
@@ -780,13 +776,10 @@ def main() -> None:
 
     if use_progress:
         assert progress is not None
-        with progress:
-            with ThreadPoolExecutor(max_workers=workers) as executor:
-                future_to_name = {
-                    executor.submit(_run, g): g.get("name", "unnamed") for g in groups
-                }
-                for future in as_completed(future_to_name):
-                    results.append(future.result())
+        with progress, ThreadPoolExecutor(max_workers=workers) as executor:
+            future_to_name = {executor.submit(_run, g): g.get("name", "unnamed") for g in groups}
+            for future in as_completed(future_to_name):
+                results.append(future.result())
     else:
         # Fallback: no progress bars
         with ThreadPoolExecutor(max_workers=workers) as executor:
