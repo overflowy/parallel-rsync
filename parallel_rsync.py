@@ -3,15 +3,17 @@
 import argparse
 import logging
 import os
+import posixpath
 import re
 import shlex
 import subprocess
 import sys
 import threading
 import time
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import yaml
 
@@ -111,7 +113,7 @@ def load_config(path: Path) -> dict:
         cfg = yaml.safe_load(f)
 
     if not isinstance(cfg, dict) or "groups" not in cfg:
-        raise ValueError("YAML must contain a top‑level 'groups' key.")
+        raise ValueError("YAML must contain a top-level 'groups' key.")
     if not isinstance(cfg["groups"], list):
         raise TypeError("'groups' must be a list of group definitions.")
     if "global_options" in cfg and not isinstance(cfg["global_options"], list):
@@ -192,6 +194,228 @@ def unmounted_volume_paths(groups: list[dict]) -> dict[str, list[str]]:
             if name not in names:
                 names.append(name)
     return problems
+
+
+# ssh-style path with a bracketed IPv6 host: [user@][v6literal]:path or ::module.
+# Matched before the plain host checks so the literal's colons are never
+# mistaken for the host separator.
+_IPV6_HOST_RE = re.compile(r"^(?:(?P<user>[^@/]+)@)?\[(?P<host>[^\]/]+)\](?P<rest>:.*)$")
+
+# Receiver-side directory options that name extra trees a job touches beyond
+# src and dest. The write options are singular (rsync keeps the last one
+# given); the *-dest options may repeat, so every occurrence counts.
+_WRITE_DIR_OPTIONS = ("--backup-dir", "--partial-dir", "--temp-dir")
+_READ_DIR_OPTIONS = ("--link-dest", "--compare-dest", "--copy-dest")
+_VALUE_OPTIONS = _WRITE_DIR_OPTIONS + _READ_DIR_OPTIONS + ("--port",)
+
+
+def _effective_dir_options(options: list[str]) -> tuple[list[tuple[str, str]], str]:
+    """Resolve the tracked directory options to their effective (name, value) pairs.
+
+    Accepts both '--opt=value' and separate '--opt', 'value' spellings (these
+    options require an argument, so rsync consumes the next argv either way).
+    Singular options obey rsync's last-one-wins rule. Also returns the
+    effective daemon --port ('' if unset).
+    """
+    singular: dict[str, str] = {}
+    repeated: list[tuple[str, str]] = []
+    port = ""
+    i = 0
+    while i < len(options):
+        name, sep, value = options[i].partition("=")
+        if not sep and name in _VALUE_OPTIONS and i + 1 < len(options):
+            i += 1
+            value = options[i]
+        i += 1
+        if name == "--port":
+            port = value
+        elif name in _WRITE_DIR_OPTIONS:
+            singular[name] = value
+        elif name in _READ_DIR_OPTIONS:
+            repeated.append((name, value))
+    return list(singular.items()) + repeated, port
+
+
+def _split_authority(authority: str) -> tuple[str, str, str]:
+    """Split an rsync:// authority '[user@]host[:port]' into (user, host, port).
+
+    A bracketed IPv6 literal keeps its brackets so its colons are never
+    mistaken for the port separator.
+    """
+    user, _, hostport = authority.rpartition("@")
+    if hostport.startswith("["):
+        host, _, rest = hostport.partition("]")
+        return user, (host + "]").lower(), rest.lstrip(":")
+    host, _, port = hostport.partition(":")
+    return user, host.lower(), port
+
+
+def _remote_parts(remote: str, user: str) -> tuple[str, ...]:
+    """Components of an ssh-style remote path.
+
+    'backup', './backup', and '~/backup' all mean the same directory under the
+    login user's home, so relative spellings share a '~<user>' anchor (the
+    user matters: alice's and bob's homes are different trees). '..'
+    components collapse textually via normpath, matching what the remote
+    shell does absent symlinks.
+    """
+    if remote == "~" or remote.startswith("~/"):
+        remote = remote[2:]
+    norm = posixpath.normpath(remote) if remote else "."
+    if norm.startswith("/"):
+        return PurePosixPath(norm).parts
+    anchor = ("~" + user,)
+    return anchor if norm == "." else anchor + PurePosixPath(norm).parts
+
+
+def _module_parts(module: str) -> tuple[str, ...]:
+    """Components of a daemon module path, '..' collapsed."""
+    return PurePosixPath(posixpath.normpath("/" + module)).parts
+
+
+def _daemon_ns(host: str, port: str) -> str:
+    """Daemon namespace for a host, distinct per non-default port."""
+    return host + ("" if port in ("", "873") else ":" + port) + "::"
+
+
+def _join_parts(base: tuple[str, ...], value: str) -> tuple[str, ...]:
+    """Append a relative path to component *base*, collapsing '..' across the join.
+
+    Textual collapse (never past the anchor), so '--backup-dir=../shared'
+    under dest /backup/a compares equal to /backup/shared.
+    """
+    parts = list(base)
+    for comp in PurePosixPath(posixpath.normpath(value)).parts:
+        if comp == "..":
+            if len(parts) > 1:
+                parts.pop()
+        else:
+            parts.append(comp)
+    return tuple(parts)
+
+
+def _endpoint_key(path: str, daemon_port: str = "") -> tuple[str, tuple[str, ...]]:
+    """Canonical (namespace, path components) form of an endpoint for overlap checks.
+
+    Local paths resolve through realpath so different spellings of the same
+    tree (symlinks, '..', doubled slashes) compare equal. Remote paths are
+    compared textually per host, which catches identical or nested config
+    entries without touching the network. Daemon-style endpoints (host:: and
+    rsync://) get a distinct namespace, including any non-default port, so a
+    module name never matches an ssh-style path. *daemon_port* is the group's
+    effective --port option; an explicit rsync:// URL port wins over it.
+    """
+    if path.startswith("rsync://"):
+        authority, _, module = path[len("rsync://") :].partition("/")
+        _, host, port = _split_authority(authority)
+        return _daemon_ns(host, port or daemon_port), _module_parts(module)
+    m = _IPV6_HOST_RE.match(path)
+    if m:
+        host, rest = "[" + m.group("host").lower() + "]", m.group("rest")
+        if rest.startswith("::"):
+            return _daemon_ns(host, daemon_port), _module_parts(rest[2:])
+        return host, _remote_parts(rest[1:], m.group("user") or "")
+    head = path.split("/", 1)[0]
+    if "::" in head:
+        userhost, _, module = path.partition("::")
+        host = userhost.rsplit("@", 1)[-1]
+        return _daemon_ns(host.lower(), daemon_port), _module_parts(module)
+    if ":" in head:
+        userhost, _, remote = path.partition(":")
+        user, _, host = userhost.rpartition("@")
+        return host.lower(), _remote_parts(remote, user)
+    return "", Path(os.path.realpath(path)).parts
+
+
+def duplicate_group_names(groups: list[dict]) -> list[str]:
+    """Group names appearing more than once (progress rows are keyed by name)."""
+    counts = Counter(g.get("name", "<unnamed>") for g in groups)
+    return [name for name, count in counts.items() if count > 1]
+
+
+def _group_endpoints(group: dict, global_options: list[str] | None) -> list[tuple]:
+    """Collect (role, shown path, writes, namespace, parts) for one group.
+
+    Beyond src and dest, the group's effective options contribute:
+    --remove-source-files makes the src writable, and the receiver-side
+    directory options name extra trees on the dest side. Absolute option
+    values live on the dest host; relative values resolve against the dest
+    directory.
+    """
+    excludes = group.get("exclude_options") or []
+    kept_globals = [o for o in (global_options or []) if not _option_excluded(o, excludes)]
+    options = kept_globals + list(group.get("options") or [])
+    dir_options, port = _effective_dir_options(options)
+
+    endpoints = []
+    src = group.get("src") or ""
+    dest = group.get("dest") or ""
+    if src:
+        writes = "--remove-source-files" in options
+        endpoints.append(("src", src, writes, *_endpoint_key(src, port)))
+    if not dest:
+        return endpoints
+    dest_ns, dest_parts = _endpoint_key(dest, port)
+    endpoints.append(("dest", dest, True, dest_ns, dest_parts))
+    for opt_name, value in dir_options:
+        if not value:
+            continue
+        writes = opt_name in _WRITE_DIR_OPTIONS
+        if not value.startswith("/"):
+            key = (dest_ns, _join_parts(dest_parts, value))
+        elif dest_ns:
+            key = (dest_ns, PurePosixPath(posixpath.normpath(value)).parts)
+        else:
+            key = ("", Path(os.path.realpath(value)).parts)
+        endpoints.append((opt_name.lstrip("-"), value, writes, *key))
+    return endpoints
+
+
+def path_overlap_conflicts(
+    groups: list[dict], global_options: list[str] | None = None
+) -> list[str]:
+    """Describe endpoint pairs where one path is the other or contains it.
+
+    Overlapping dests make concurrent jobs race on the same files, and with
+    --delete one job wipes what the other just wrote. A src overlapping a
+    dest means one job reads a tree while another mutates it (or, within a
+    single group, rsync copies into its own source). Pairs where neither side
+    writes are skipped: any number of groups may read a shared src or
+    --link-dest tree. Within a single group, pairs not involving the src are
+    skipped: options like a relative --partial-dir legitimately nest inside
+    their own dest, but an option dir landing inside the group's own src is
+    still flagged (rsync would write into the tree it is reading).
+
+    Best-effort by design: the configured strings are what gets compared, so
+    the same tree reached through different host spellings (an ssh alias vs
+    its hostname, localhost: vs a plain local path) or through different
+    casings on a case-insensitive filesystem is not detected.
+    """
+    endpoints = [
+        (idx, group.get("name", "<unnamed>"), *endpoint)
+        for idx, group in enumerate(groups)
+        for endpoint in _group_endpoints(group, global_options)
+    ]
+    conflicts = []
+    for i, (idx_a, name_a, role_a, path_a, writes_a, ns_a, parts_a) in enumerate(endpoints):
+        for idx_b, name_b, role_b, path_b, writes_b, ns_b, parts_b in endpoints[i + 1 :]:
+            if ns_a != ns_b or not (writes_a or writes_b):
+                continue
+            if idx_a == idx_b and "src" not in (role_a, role_b):
+                continue
+            if parts_a[: len(parts_b)] != parts_b and parts_b[: len(parts_a)] != parts_a:
+                continue
+            if parts_a == parts_b:
+                relation = "is the same path as"
+            elif len(parts_a) > len(parts_b):
+                relation = "is inside"
+            else:
+                relation = "contains"
+            owner = "its own" if idx_a == idx_b else f"group '{name_b}'"
+            conflicts.append(
+                f"Group '{name_a}' {role_a} ({path_a}) {relation} {owner} {role_b} ({path_b})."
+            )
+    return conflicts
 
 
 def _option_excluded(option: str, excludes: list[str]) -> bool:
@@ -382,7 +606,10 @@ def run_rsync_live(
                 proc.wait()
                 t_out.join(timeout=2)
                 t_err.join(timeout=2)
-                _log(f"[{name}] rsync timed out after {timeout}s on host '{host}'", "error")
+                _log(
+                    f"[{name}] rsync timed out after {timeout}s on host '{host}'",
+                    "error",
+                )
                 if progress and task_id is not None:
                     progress.update(task_id, eta="--:--", **_status_fields("timeout"))
                 return {
@@ -699,6 +926,18 @@ def main() -> None:
             g["options"] = opts
             patched.append(g)
         groups = patched
+
+    # ------------------------------------------------------------------
+    # Refuse to run with colliding groups
+    # ------------------------------------------------------------------
+    collisions = [
+        f"Duplicate group name '{name}'." for name in duplicate_group_names(groups)
+    ] + path_overlap_conflicts(groups, global_options)
+    if collisions:
+        for msg in collisions:
+            print(f"Error: {msg}", file=sys.stderr)
+            logger.error(msg)
+        sys.exit(1)
 
     # ------------------------------------------------------------------
     # Refuse to run against unmounted volumes
